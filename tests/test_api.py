@@ -21,6 +21,8 @@ SOCKET_TIMEOUT_SECONDS = 2
 SOCKET_READ_BYTES = 4096
 MAX_RESPONSE_BYTES = 65536
 TASK_CAPACITY = 128
+HEADER_LIMIT_BYTES = 8192
+BODY_LIMIT_BYTES = 4096
 
 
 def unused_port():
@@ -81,10 +83,14 @@ class CServeApiTests(unittest.TestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
 
-    def raw_response(self, request):
+    def raw_response(self, request, *, shutdown_write=False):
         with socket.create_connection(("127.0.0.1", self.port),
                                       timeout=SOCKET_TIMEOUT_SECONDS) as conn:
-            conn.sendall(request)
+            chunks = (request,) if isinstance(request, bytes) else request
+            for chunk in chunks:
+                conn.sendall(chunk)
+            if shutdown_write:
+                conn.shutdown(socket.SHUT_WR)
             response = bytearray()
             while True:
                 chunk = conn.recv(SOCKET_READ_BYTES)
@@ -92,6 +98,82 @@ class CServeApiTests(unittest.TestCase):
                     return bytes(response)
                 response.extend(chunk)
                 self.assertLessEqual(len(response), MAX_RESPONSE_BYTES)
+
+    def assert_raw_status(self, request, status, *, shutdown_write=False):
+        wire = self.raw_response(request, shutdown_write=shutdown_write)
+        header, body = wire.split(b"\r\n\r\n", 1)
+        self.assertEqual(int(header.split(b" ", 2)[1]), status)
+        headers = dict(line.decode("ascii").split(": ", 1)
+                       for line in header.split(b"\r\n")[1:])
+        self.assert_response_metadata(body, headers)
+        return body
+
+    def test_invalid_content_lengths(self):
+        cases = (
+            b"Content-Length: 0\r\nContent-Length: 0\r\n",
+            b"Content-Length: -1\r\n",
+            b"Content-Length: abc\r\n",
+            b"Content-Length: \r\n",
+            b"Content-Length: 18446744073709551616\r\n",
+        )
+        for headers in cases:
+            with self.subTest(headers=headers):
+                request = b"POST /api/tasks HTTP/1.1\r\n" + headers + b"\r\n"
+                body = self.assert_raw_status(request, HTTPStatus.BAD_REQUEST)
+                self.assertEqual(body, b'{"error":"invalid request"}')
+
+    def test_transfer_encoding_rejected(self):
+        self.assert_raw_status(
+            b"POST /api/tasks HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            HTTPStatus.BAD_REQUEST,
+        )
+
+    def test_body_length_limit(self):
+        self.assert_raw_status(
+            b"POST /api/tasks HTTP/1.1\r\nContent-Length: 4097\r\n\r\n",
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        )
+        # A valid title with whitespace padding exercises exactly 4096 body bytes.
+        body = b'{"title":"at body limit"}'
+        body += b" " * (BODY_LIMIT_BYTES - len(body))
+        request = b"POST /api/tasks HTTP/1.1\r\nContent-Length: 4096\r\n\r\n" + body
+        result = self.assert_raw_status(request, HTTPStatus.CREATED)
+        self.assertEqual(json.loads(result), {"id": 1, "title": "at body limit"})
+
+    def test_unterminated_header_limit(self):
+        prefix = b"GET /health HTTP/1.1\r\nX-Padding: "
+        request = prefix + b"x" * (HEADER_LIMIT_BYTES - len(prefix))
+        self.assert_raw_status(request, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+    def test_complete_header_limit(self):
+        prefix = b"GET /health HTTP/1.1\r\nX-Padding: "
+        suffix = b"\r\n\r\n"
+        request = prefix + b"x" * (HEADER_LIMIT_BYTES - len(prefix) - len(suffix)) + suffix
+        self.assert_raw_status(request, HTTPStatus.OK)
+        # One additional padding byte puts the complete header over the limit.
+        self.assert_raw_status(prefix + b"x" + request[len(prefix):],
+                               HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+    def test_fragmented_request(self):
+        body = b'{"title":"fragmented request"}'
+        chunks = (
+            b"POST /api/", b"tasks HTTP/1.1\r\nContent-Len", b"gth: ",
+            str(len(body)).encode("ascii"), b"\r\n\r", b"\n", body[:1], body[1:],
+        )
+        result = self.assert_raw_status(chunks, HTTPStatus.CREATED)
+        self.assertEqual(json.loads(result), {"id": 1, "title": "fragmented request"})
+
+    def test_nul_body_rejected(self):
+        self.assert_raw_status(
+            b"POST /api/tasks HTTP/1.1\r\nContent-Length: 1\r\n\r\n\x00",
+            HTTPStatus.BAD_REQUEST,
+        )
+
+    def test_incomplete_body_at_eof(self):
+        self.assert_raw_status(
+            b"POST /api/tasks HTTP/1.1\r\nContent-Length: 20\r\n\r\n{",
+            HTTPStatus.BAD_REQUEST, shutdown_write=True,
+        )
 
     def test_delete_has_no_body_on_wire(self):
         status, _, _ = self.call("POST", TASKS_PATH, {"title": "socket contract"})

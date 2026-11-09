@@ -1,11 +1,13 @@
 CC = gcc
 CFLAGS = -std=c17 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror -D_POSIX_C_SOURCE=200809L
 BIN = build/cserve
-SOURCES = src/main.c src/http_response.c src/task_storage.c
-HEADERS = src/http_response.h src/task_storage.h
+SOURCES = src/main.c src/http_response.c src/task_storage.c src/http_parser.c
+HEADERS = src/http_response.h src/task_storage.h src/http_parser.h
 RESPONSE_TEST = build/test_http_response
 STORAGE_TEST = build/test_task_storage
+PARSER_TEST = build/test_http_parser
 RESPONSE_TEST_FLAGS = -Wl,--wrap=send -Wl,--wrap=snprintf
+PARSER_TEST_FLAGS = -Wl,--wrap=recv
 
 .PHONY: all test clean debug
 all: $(BIN)
@@ -21,9 +23,14 @@ $(STORAGE_TEST): tests/test_task_storage.c src/task_storage.c src/task_storage.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) -Isrc tests/test_task_storage.c src/task_storage.c -o $@
 
-test: all $(RESPONSE_TEST) $(STORAGE_TEST)
+$(PARSER_TEST): tests/test_http_parser.c src/http_parser.c src/http_parser.h src/http_response.h
+	@mkdir -p build
+	$(CC) $(CFLAGS) -Isrc tests/test_http_parser.c src/http_parser.c $(PARSER_TEST_FLAGS) -o $@
+
+test: all $(RESPONSE_TEST) $(STORAGE_TEST) $(PARSER_TEST)
 	./$(RESPONSE_TEST)
 	./$(STORAGE_TEST)
+	./$(PARSER_TEST)
 	python3 -m unittest discover -s tests -v
 
 debug: CFLAGS += -g3 -O0 -fsanitize=address,undefined -fno-omit-frame-pointer

@@ -2,6 +2,7 @@
  * Educational server: sequential connections, in-memory data, no authentication.
  * Do not expose directly to the public Internet. */
 #define _POSIX_C_SOURCE 200809L
+#include "http_parser.h"
 #include "http_response.h"
 #include "task_storage.h"
 #include <arpa/inet.h>
@@ -15,7 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -23,99 +23,8 @@
 
 #define DEFAULT_HOST "127.0.0.1"
 #define DEFAULT_PORT 8080
-#define MAX_HEADER 8192
-#define MAX_BODY 4096
-#define MAX_WIRE (MAX_HEADER + MAX_BODY + 1)
 #define MAX_JSON 65536
 #define MAX_PAGE 32768
-
-struct Request {
-    char method[16];
-    char path[160];
-    char body[MAX_BODY + 1];
-    size_t content_length;
-};
-
-static char *find_header_end(char *buf) {
-    return strstr(buf, "\r\n\r\n");
-}
-
-static bool parse_content_length(const char *value, size_t *length) {
-    if (!*value) return false;
-    size_t result = 0;
-    for (const unsigned char *p = (const unsigned char *)value; *p; p++) {
-        if (!isdigit(*p)) return false;
-        unsigned digit = (unsigned)(*p - (unsigned char)'0');
-        if (result > (SIZE_MAX - digit) / 10U) return false;
-        result = result * 10U + digit;
-    }
-    *length = result;
-    return true;
-}
-
-/* Returns 0 on success, or an HTTP status to report to the client. */
-static int parse_headers(char *buf, struct Request *req, bool *length_seen) {
-    char *save = NULL;
-    char *line = strtok_r(buf, "\r\n", &save);
-    if (!line) return 400;
-    char version[16];
-    char extra;
-    if (sscanf(line, "%15s %159s %15s %c", req->method, req->path,
-               version, &extra) != 3 || strcmp(version, "HTTP/1.1") != 0) return 400;
-    if (req->path[0] != '/') return 400;
-    while ((line = strtok_r(NULL, "\r\n", &save)) != NULL) {
-        char *colon = strchr(line, ':');
-        if (!colon) return 400;
-        *colon++ = '\0';
-        while (*colon == ' ' || *colon == '\t') colon++;
-        if (strcasecmp(line, "Transfer-Encoding") == 0) return 400;
-        if (strcasecmp(line, "Content-Length") != 0) continue;
-        if (*length_seen) return 400;
-        *length_seen = true;
-        if (!parse_content_length(colon, &req->content_length)) return 400;
-        if (req->content_length > MAX_BODY) return 413;
-    }
-    if (strcmp(req->method, "POST") == 0 && !*length_seen) return 411;
-    return 0;
-}
-
-static int read_request(int fd, struct Request *req) {
-    char wire[MAX_WIRE + 1] = {0};
-    size_t used = 0;
-    size_t header_size = 0;
-    bool headers_done = false;
-    bool length_seen = false;
-    for (;;) {
-        if (!headers_done) {
-            char *marker = find_header_end(wire);
-            if (marker) {
-                header_size = (size_t)(marker - wire) + 4U;
-                if (header_size > MAX_HEADER) return 413;
-                *marker = '\0';
-                int status = parse_headers(wire, req, &length_seen);
-                if (status != 0) return status;
-                headers_done = true;
-            } else if (used >= MAX_HEADER) {
-                return 413;
-            }
-        }
-        if (headers_done && used >= header_size + req->content_length) {
-            if (req->content_length > 0) {
-                const char *data = wire + header_size;
-                if (memchr(data, '\0', req->content_length)) return 400;
-                memcpy(req->body, data, req->content_length);
-            }
-            req->body[req->content_length] = '\0';
-            return 0;
-        }
-        if (used >= MAX_WIRE) return 413;
-        ssize_t n = recv(fd, wire + used, MAX_WIRE - used, 0);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) return 400;
-        used += (size_t)n;
-        wire[used] = '\0';
-    }
-}
 
 static const char *skip_space(const char *p) {
     while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
@@ -346,7 +255,7 @@ static void handle_client(int fd, struct TaskStorage *storage) {
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     struct Request request = {0};
-    int status = read_request(fd, &request);
+    int status = http_read_request(fd, &request);
     if (status != 0) http_error_reply(fd, status);
     else route(fd, &request, storage);
 }
