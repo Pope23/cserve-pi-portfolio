@@ -24,6 +24,7 @@ TASK_CAPACITY = 128
 HEADER_LIMIT_BYTES = 8192
 BODY_LIMIT_BYTES = 4096
 TITLE_LIMIT_BYTES = 120
+RESOURCE_CHECK_REQUESTS = 32
 
 
 def unused_port():
@@ -32,7 +33,13 @@ def unused_port():
         return sock.getsockname()[1]
 
 
-class CServeApiTests(unittest.TestCase):
+class CServeTestCase(unittest.TestCase):
+    def assert_no_sanitizer_diagnostics(self, stderr):
+        self.assertNotIn(b"Sanitizer", stderr)
+        self.assertNotIn(b"runtime error:", stderr)
+
+
+class CServeApiTests(CServeTestCase):
     def setUp(self):
         self.port = unused_port()
         self.process = subprocess.Popen(
@@ -54,10 +61,11 @@ class CServeApiTests(unittest.TestCase):
         if self.process.poll() is None:
             self.process.terminate()
         try:
-            self.process.communicate(timeout=2)
+            _, stderr = self.process.communicate(timeout=2)
         except subprocess.TimeoutExpired:
             self.process.kill()
-            self.process.communicate()
+            _, stderr = self.process.communicate()
+        self.assert_no_sanitizer_diagnostics(stderr)
 
     def call(self, method, path, data=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
@@ -76,6 +84,24 @@ class CServeApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"status": "ok"})
         self.assertEqual(body, b'{"status":"ok"}')
+
+    def test_health_after_premature_client_close(self):
+        with socket.create_connection(("127.0.0.1", self.port),
+                                      timeout=SOCKET_TIMEOUT_SECONDS) as conn:
+            conn.sendall(b"GET /health HTTP/1.1\r\n")
+        status, body, _ = self.call("GET", HEALTH_PATH)
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(json.loads(body), {"status": "ok"})
+        self.assertIsNone(self.process.poll())
+
+    def test_client_descriptors_do_not_accumulate(self):
+        self.assertEqual(self.call("GET", HEALTH_PATH)[0], HTTPStatus.OK)
+        descriptors = Path(f"/proc/{self.process.pid}/fd")
+        baseline = len(list(descriptors.iterdir()))
+        for _ in range(RESOURCE_CHECK_REQUESTS):
+            self.assertEqual(self.call("GET", HEALTH_PATH)[0], HTTPStatus.OK)
+        # At most one client can still be closing when /proc is inspected.
+        self.assertLessEqual(len(list(descriptors.iterdir())), baseline + 1)
 
     def assert_response_metadata(self, body, headers, mime=JSON_MIME):
         self.assertEqual(headers["Content-Type"], mime)
@@ -403,6 +429,31 @@ class CServeApiTests(unittest.TestCase):
             self.assertEqual(conn.getresponse().status, 413)
         finally:
             conn.close()
+
+
+class CServeStartupTests(CServeTestCase):
+    def test_invalid_cli_arguments(self):
+        invalid = (("--unknown",), ("--host",), ("--port",),
+                   ("--port", "0"), ("--port", "65536"),
+                   ("--host", "192.0.2.1"))
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([str(BINARY), *arguments], cwd=ROOT,
+                                        capture_output=True, timeout=SOCKET_TIMEOUT_SECONDS)
+                self.assertEqual(result.returncode, 2)
+                self.assertTrue(result.stderr)
+                self.assert_no_sanitizer_diagnostics(result.stderr)
+
+    def test_occupied_port(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            result = subprocess.run([str(BINARY), "--host", "127.0.0.1", "--port", str(port)],
+                                    cwd=ROOT, capture_output=True, timeout=SOCKET_TIMEOUT_SECONDS)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"bind/listen", result.stderr)
+        self.assert_no_sanitizer_diagnostics(result.stderr)
 
 
 if __name__ == "__main__":
