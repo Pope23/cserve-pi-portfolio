@@ -1,8 +1,8 @@
 CC = gcc
 CFLAGS = -std=c17 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror -D_POSIX_C_SOURCE=200809L
 BIN = build/cserve
-SOURCES = src/main.c src/http_response.c src/task_storage.c src/http_parser.c
-HEADERS = src/http_response.h src/task_storage.h src/http_parser.h
+SOURCES = src/main.c src/http_response.c src/task_storage.c src/http_parser.c src/router.c
+HEADERS = src/http_response.h src/task_storage.h src/http_parser.h src/router.h
 RESPONSE_TEST = build/test_http_response
 STORAGE_TEST = build/test_task_storage
 PARSER_TEST = build/test_http_parser

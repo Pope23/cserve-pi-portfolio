@@ -23,6 +23,7 @@ MAX_RESPONSE_BYTES = 65536
 TASK_CAPACITY = 128
 HEADER_LIMIT_BYTES = 8192
 BODY_LIMIT_BYTES = 4096
+TITLE_LIMIT_BYTES = 120
 
 
 def unused_port():
@@ -326,6 +327,68 @@ class CServeApiTests(unittest.TestCase):
                 status, body, _ = self.call("POST", "/api/tasks", bad)
                 self.assertEqual(status, 400)
                 self.assertIn("error", json.loads(body))
+
+    def post_json_bytes(self, body, status):
+        header = (b"POST /api/tasks HTTP/1.1\r\nContent-Length: "
+                  + str(len(body)).encode("ascii") + b"\r\n\r\n")
+        return self.assert_raw_status(header + body, status)
+
+    def test_title_ascii_byte_limits(self):
+        title = "x" * TITLE_LIMIT_BYTES
+        status, body, _ = self.call("POST", TASKS_PATH, {"title": title})
+        self.assertEqual(status, HTTPStatus.CREATED)
+        self.assertEqual(json.loads(body), {"id": 1, "title": title})
+        status, _, _ = self.call("POST", TASKS_PATH, {"title": title + "x"})
+        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+
+    def test_title_unicode_byte_limits(self):
+        title = "ă" * 60  # 120 UTF-8 bytes, rather than 120 characters.
+        self.assertEqual(len(title.encode("utf-8")), TITLE_LIMIT_BYTES)
+        status, body, _ = self.call("POST", TASKS_PATH, {"title": title})
+        self.assertEqual(status, HTTPStatus.CREATED)
+        self.assertEqual(json.loads(body), {"id": 1, "title": title})
+        status, _, _ = self.call("POST", TASKS_PATH, {"title": title + "ă"})
+        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+
+    def test_surrogate_escape_validation(self):
+        invalid = (b'{"title":"\\uD800"}', b'{"title":"\\uDC00"}',
+                   b'{"title":"\\uD800\\uD800"}', b'{"title":"\\uD800\\u0041"}')
+        for body in invalid:
+            with self.subTest(body=body):
+                self.post_json_bytes(body, HTTPStatus.BAD_REQUEST)
+        body = self.post_json_bytes(b'{"title":"\\uD83D\\uDE42"}', HTTPStatus.CREATED)
+        self.assertEqual(json.loads(body), {"id": 1, "title": "🙂"})
+
+    def test_control_escapes_rejected(self):
+        for escape in (b"\\n", b"\\t", b"\\u0000", b"\\u001f"):
+            with self.subTest(escape=escape):
+                self.post_json_bytes(b'{"title":"a' + escape + b'b"}',
+                                     HTTPStatus.BAD_REQUEST)
+
+    def test_extended_or_incomplete_json_rejected(self):
+        invalid = (b'{"title":"x","other":1}', b'{"title":"x"} trailing',
+                   b'{"title":"x","title":"y"}', b'{}', b'{"title":',
+                   b'{"title":"x', b'{"title":"x"', b'{"title":"\\')
+        for body in invalid:
+            with self.subTest(body=body):
+                self.post_json_bytes(body, HTTPStatus.BAD_REQUEST)
+
+    def test_maximum_escaped_title_roundtrip(self):
+        title = '"\\' * 60
+        self.assertEqual(len(title.encode("utf-8")), TITLE_LIMIT_BYTES)
+        status, body, headers = self.call("POST", TASKS_PATH, {"title": title})
+        self.assertEqual(status, HTTPStatus.CREATED)
+        task = {"id": 1, "title": title}
+        self.assertEqual(json.loads(body), task)
+        self.assert_response_metadata(body, headers)
+        self.assertEqual(json.loads(self.call("GET", TASKS_PATH)[1]), {"tasks": [task]})
+
+    def test_task_route_boundaries(self):
+        paths = ("/api/tasks/1/extra", "/api/tasksX/1", "/api/tasks/", "/api/tasks?x=1")
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(self.call("DELETE", path)[0], HTTPStatus.NOT_FOUND)
+                self.assertEqual(self.call("GET", path)[0], HTTPStatus.NOT_FOUND)
 
     def test_not_found_and_method(self):
         self.assertEqual(self.call("GET", "/nothing")[0], 404)
