@@ -2,7 +2,7 @@
 
 ## Mediu și finalizarea etapei 2 — 2026-11-09
 
-Host verificat: `Pope23`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1.
+Host verificat: `Raspberry Pi test host`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1.
 Director: `<project-root>`.
 
 `git status` și `git diff` inițiale au confirmat exclusiv fișierele etapei 2:

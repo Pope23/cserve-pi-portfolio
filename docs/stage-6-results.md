@@ -2,7 +2,7 @@
 
 ## Mediu și finalizarea etapei 5 — 2026-11-09
 
-Verificat: `Pope23`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1,
+Verificat: `Raspberry Pi test host`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1,
 `<project-root>`. Diff-ul și fișierele noi inițiale aparțineau
 exclusiv etapei 5. Backupurile sunt păstrate și ignorate prin /backups/.
 

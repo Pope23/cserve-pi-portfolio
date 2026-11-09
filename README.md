@@ -1,226 +1,174 @@
-# CServe Pi — lightweight HTTP task server in C17
+# CServe Pi
 
-Un mic server HTTP/1.1 în C17, compilat nativ pe **Raspberry Pi OS / Linux**.
-Realizează conexiuni TCP cu POSIX sockets și oferă un dashboard HTML + REST API.
-Nu necesită framework-uri, librării C externe sau Docker.
+A small HTTP task API written in **C17** for **Linux and Raspberry Pi**. Built
+as an educational backend project to demonstrate POSIX networking, bounded
+input parsing, explicit resource ownership, modular design, and integration testing.
 
-> **Important:** proiect educațional / portofoliu. Nu este un server HTTP de producție.
-> Nu are autentificare sau HTTPS; nu redirecționa portul 8080 din router către Internet.
+**For localhost and controlled LAN demonstrations. This is not a production
+HTTP server and must not be exposed directly to the public Internet.**
 
-## Funcționalități
+## Features
 
-- `GET /` — interfață web pentru taskuri.
-- `GET /health` — diagnostic `{"status":"ok"}`.
-- `GET /api/tasks` — listă `{"tasks":[{"id":1,"title":"..."}]}`.
-- `POST /api/tasks` — adaugă un task cu `{"title":"Învață C"}` (201).
-- `DELETE /api/tasks/1` — șterge taskul cu ID 1 (204).
-- Validare de bază a datelor și coduri HTTP (400, 404, 405, 411, 413, 507).
-- Teste de integrare în Python standard library.
-- Configurare `--host` și `--port`; maximum 128 taskuri în memorie.
+- A browser dashboard for creating, listing, and deleting tasks.
+- A JSON API and a health endpoint.
+- Up to 128 tasks stored in memory, with monotonically increasing IDs.
+- Task titles limited to 120 UTF-8 bytes, with JSON escaping and Unicode escape decoding.
+- Bounded HTTP headers and bodies, explicit Content-Length, and error responses.
+- Sequential IPv4 connections, closed after one request.
+- Configurable bind address and port; loopback is the default.
+- Python integration tests and independent C test programs.
 
-**Limitări asumate:** taskurile se pierd la repornire, serverul deservește o conexiune
-la un moment dat, suportă un subset al HTTP/1.1 (fără keep-alive, chunked uploads,
-TLS, server public sau autentificare). JSON-ul de creare acceptă un singur câmp
-`title`, un șir UTF-8 de maximum 120 **octeți**.
+## Architecture
 
-## 1. Pe Raspberry Pi — instalează uneltele
-
-Ai nevoie de Raspberry Pi cu Raspberry Pi OS deja instalat, conectat în aceeași
-rețea cu laptopul. Deschide terminalul pe Pi sau conectează-te de pe Windows:
-
-```powershell
-ssh NUME_UTILIZATOR@IP_RASPBERRY_PI
+```text
+main -> server -> http_parser
+               -> router -> task_storage
+                         -> http_response
 ```
 
-Pe Raspberry Pi, rulează:
+| Module | Responsibility |
+| --- | --- |
+| `src/main.c` | Parse and validate command-line configuration. |
+| `src/server.c` | Own the listener, accepted connections, timeouts, and task context. |
+| `src/http_parser.c` | Read one bounded request and validate framing. |
+| `src/router.c` | Dispatch routes, validate JSON/IDs, serialize tasks, and serve the fixed dashboard. |
+| `src/task_storage.c` | Own task slots and IDs; provide create, delete, and read access. |
+| `src/http_response.c` | Format headers and send JSON, errors, and empty responses. |
 
-```bash
-sudo apt update
-sudo apt install -y build-essential python3 curl unzip git
+Each reusable module has a header. Internal helpers remain private. The router
+borrows connection descriptors; the server closes them. Storage has no HTTP or
+socket dependency. See [the design](docs/design.md) for contracts and ownership.
+
+## Requirements
+
+- Linux, including Raspberry Pi OS on ARM64.
+- GCC or Clang with C17 support, GNU-compatible linker, and Make.
+- Python 3 with its standard library for integration tests.
+- Optional: curl for examples, a browser for the dashboard, and compiler
+  sanitizer runtimes for ASan/UBSan.
+
+The server has no external C library, database, or framework dependency. Tests
+use GNU linker wrapping for deterministic system-call failures and Linux `/proc`
+for descriptor checks. No Python packages are required to run the test suite.
+
+## Build and run
+
+Run commands from the repository root; the dashboard is loaded from
+`web/index.html` relative to the working directory.
+
+```sh
+make                         # Release build with GCC and strict warnings
+./build/cserve               # http://127.0.0.1:8080
 ```
 
-`make`, `gcc` și Python sunt folosite pentru build și teste.
-Nu e necesar WSL/Visual Studio pe placa Raspberry Pi.
+To select Clang or a different local port:
 
-## 2. Transferă arhiva de pe Windows pe Pi
-
-Descarcă `cserve-pi.zip` din conversație în folderul Downloads. În **PowerShell**:
-
-```powershell
-scp "$env:USERPROFILE\Downloads\cserve-pi.zip" NUME_UTILIZATOR@IP_RASPBERRY_PI:~/
+```sh
+make clean && make CC=clang
+./build/cserve --host 127.0.0.1 --port 8081
 ```
 
-Apoi, în terminalul Raspberry Pi:
+Open `http://127.0.0.1:8080/` for the dashboard when using the default port.
+For an explicit, controlled LAN demo only:
 
-```bash
-unzip ~/cserve-pi.zip -d ~
-cd ~/cserve-pi
-```
-
-Alternativ, după ce proiectul este publicat pe GitHub, îl poți clona direct:
-
-```bash
-git clone URL_REPOSITORY_TAU.git ~/cserve-pi
-cd ~/cserve-pi
-```
-
-## 3. Compilează și testează pe placa Raspberry Pi
-
-```bash
-make
-make test
-```
-
-La final ar trebui să apară `OK`. Testele pornesc automat câte un server
-local temporar și verifică HTTP, JSON, Unicode, operațiile CRUD și erorile.
-
-Pentru o compilare cu sanitizers pe Linux, dacă sunt disponibile:
-
-```bash
-make debug
-make test
-```
-
-`make debug` instrumentează serverul cu ASan/UBSan. Pentru a instrumenta și
-toate harness-urile C, configurația verificată pe Pi este:
-
-```bash
-make clean
-UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=halt_on_error=1 make CC=clang CFLAGS='-std=c17 -O1 -g -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror -D_POSIX_C_SOURCE=200809L -fsanitize=address,undefined -fno-omit-frame-pointer' test
-```
-
-Pentru a reveni la binarul normal: `make clean && make`.
-
-## 4. Pornește serverul
-
-Doar pe Raspberry Pi (acces local):
-
-```bash
-./build/cserve
-```
-
-Verifică într-un al doilea terminal de pe Pi:
-
-```bash
-curl http://127.0.0.1:8080/health
-```
-
-Pentru acces de pe laptop în **aceeași rețea locală**, oprește serverul
-cu `Ctrl+C` și repornește-l astfel:
-
-```bash
+```sh
 ./build/cserve --host 0.0.0.0 --port 8080
 ```
 
-Află IP-ul plăcii:
+Access the device using its own LAN address. Do not configure public port
+forwarding. The CLI accepts only the loopback or all-interface bind address.
+Stop the server with Ctrl+C; this terminates the process rather than draining requests.
 
-```bash
-hostname -I
-```
+## API
 
-Pe laptop deschide în browser `http://IP_RASPBERRY_PI:8080/`, de exemplu
-`http://192.168.1.50:8080/` **doar dacă acesta este IP-ul real al plăcii**.
+| Method | Path | Success response |
+| --- | --- | --- |
+| GET | `/` | 200, HTML dashboard |
+| GET | `/health` | 200, `{"status":"ok"}` |
+| GET | `/api/tasks` | 200, `{"tasks":[]}` or the current tasks |
+| POST | `/api/tasks` | 201, `{"id":1,"title":"Learn sockets"}` |
+| DELETE | `/api/tasks/1` | 204, empty body |
 
-## 5. Testează endpointurile manual
+The ID shown assumes a fresh server. Creation accepts exactly one JSON field,
+`title`, containing a nonblank string. Titles are limited in **bytes**, not
+characters. Tasks disappear when the process stops.
 
-Într-un alt terminal Raspberry Pi, cât timp serverul rulează:
-
-```bash
-curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/api/tasks
-curl -i -X POST http://127.0.0.1:8080/api/tasks \
+```sh
+curl -i http://127.0.0.1:8080/health
+curl -i http://127.0.0.1:8080/api/tasks
+curl -i http://127.0.0.1:8080/api/tasks \
   -H 'Content-Type: application/json' \
-  --data '{"title":"Test pe Raspberry Pi"}'
-curl http://127.0.0.1:8080/api/tasks
+  --data '{"title":"Learn sockets"}'
 curl -i -X DELETE http://127.0.0.1:8080/api/tasks/1
 ```
 
-## 6. Opțional: pornire automată cu systemd (user service)
+Errors include 400 for invalid input, 404 for unknown resources or invalid task
+IDs, 405 for unsupported methods on `/api/tasks`, 411 for POST without
+Content-Length, 413 for oversized requests, 500 for internal errors, and 507
+when storage is full. The implementation preserves its documented HTTP subset;
+method handling is not a general-purpose REST framework.
 
-Acest pas presupune că proiectul este în `~/cserve-pi` și că dorești să îl
-accesezi pe rețeaua locală. Este util pentru un Pi fără monitor:
+## Tests and debug builds
 
-```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/cserve.service ~/.config/systemd/user/cserve.service
-systemctl --user daemon-reload
-systemctl --user enable --now cserve.service
-systemctl --user status cserve.service
+```sh
+make clean && make CC=gcc && make CC=gcc test
+make clean && make CC=clang && make CC=clang test
+make debug && make test
 ```
 
-Pentru ca serviciul utilizatorului să poată porni și după reboot, chiar
-fără autentificare SSH, poți activa *linger*:
+Pass `CC` to both Make invocations: compiler selection does not persist across
+commands. Release uses `-O2`; `make debug` rebuilds the server with debug symbols,
+`-O0`, AddressSanitizer and UndefinedBehaviorSanitizer. It does not automatically
+instrument test binaries built by a later Make invocation.
 
-```bash
-sudo loginctl enable-linger "$USER"
+For a fully instrumented server and all C tests:
+
+```sh
+make clean
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 make CC=clang CFLAGS='-std=c17 -O1 -g -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror -D_POSIX_C_SOURCE=200809L -fsanitize=address,undefined -fno-omit-frame-pointer' test
 ```
 
-Jurnal: `journalctl --user -u cserve.service -f`
+`make test` runs **41 Python test methods and 26 C scenario groups** across four
+programs. Integration tests start the real server on temporary loopback ports.
+Coverage includes CRUD, JSON/Unicode, exact headers, 204 on the wire, malformed
+and oversized requests, storage capacity and ID exhaustion, socket failures,
+EINTR/partial transfers, descriptor cleanup, CLI errors, timeouts, and signals.
+Injected errno messages from the lifecycle tests are expected.
 
-Oprire: `systemctl --user stop cserve.service`
+Native GCC/Clang and sanitizer runs have passed on a Raspberry Pi 5 ARM64.
+No benchmark or throughput claim is made. The attempted browser-check status and its limitations are recorded in
+[release readiness](docs/release-readiness.md).
 
-**Nu porni serverul manual în același timp cu serviciul:** ambele vor
-încerca să folosească portul 8080 și vei primi `Address already in use`.
+## Continuous integration
 
-## 7. Superpowers — agentul de programare
+[The workflow](.github/workflows/ci.yml) targets GitHub-hosted Ubuntu on pushes
+to `main` and pull requests targeting `main`. It builds and tests a GCC/Clang
+matrix, and runs a separate Clang ASan/UBSan job with all binaries instrumented.
+It uses read-only repository permissions and never relies on a public Raspberry
+Pi runner. Remote CI results remain unverified until the repository is published
+and the workflow actually runs; local commands have been validated separately.
 
-Superpowers (`https://github.com/obra/superpowers`) este o metodologie pentru
-agenții de cod, **nu** o dependență a serverului C. Instalează pluginul în
-mediul tău de cod, de exemplu Cursor Agent: `/add-plugin superpowers`, sau
-Codex CLI: `/plugins` > caută `superpowers` > `Install Plugin`.
+## Limits and security
 
-Deschide folderul `cserve-pi` cu agentul (local sau prin VS Code Remote SSH),
-iar agentul va putea citi `AGENTS.md`, `docs/design.md` și `docs/roadmap.md`.
-Poți începe cu promptul din `docs/prompt-superpowers.md`.
+- No authentication, authorization, HTTPS, persistence, or concurrency.
+- HTTP/1.1 subset: no keep-alive, chunked uploads, or full RFC compliance.
+- Headers: 8192 bytes; body: 4096 bytes; task title: 120 bytes.
+- Five-second recv/send inactivity timeouts are not a total request deadline.
+  Socket-option failures are ignored; a slow client can monopolize the server.
+- Direct UTF-8 input is not fully validated. The dashboard input length also
+  does not measure UTF-8 bytes; the server enforces its own byte limit.
+- Dashboard task text uses `textContent`, never untrusted `innerHTML`.
+- Transport errors are not propagated through the response API.
+- SIGTERM/SIGINT use default termination. The kernel releases descriptors,
+  but application cleanup and normal exit-time LeakSanitizer checks are bypassed.
+  No LSan report after a signal is not proof that no leaks exist.
 
-## Structură
+See [the technical audit](docs/stage-7-results.md) and
+[release readiness](docs/release-readiness.md) for evidence and remaining limits.
 
-```text
-cserve-pi/
-  src/main.c                 CLI și configurația validată
-  src/server.c / .h          listener, clienți, timeouturi și context storage
-  src/http_parser.c / .h     parsare HTTP și citire limitată a cererii
-  src/router.c / .h          rute, handlers, JSON și pagina fixă
-  src/http_response.c / .h   formatarea și trimiterea răspunsurilor
-  src/task_storage.c / .h    array în memorie, ID-uri și operații cu taskuri
-  web/index.html             dashboard în HTML/JS
-  tests/test_api.py          teste de integrare
-  tests/test_http_response.c teste C pentru send/formatare/erori
-  tests/test_http_parser.c   teste C pentru recv/parsare/limite
-  tests/test_task_storage.c  teste C pentru capacitate/ID-uri/izolare
-  tests/test_server.c        teste C pentru ciclul de viață și cleanup
-  deploy/cserve.service      user service systemd, opțional
-  docs/design.md             arhitectura modulară și contractele
-  docs/refactor-plan.md      cele șapte etape de refactorizare
-  docs/stage-7-results.md    auditul și rezultatele finale
-  docs/roadmap.md            idei de evoluție testabile
-  docs/prompt-superpowers.md prompt pentru agent AI
-  AGENTS.md                  reguli de lucru
-  Makefile                   build și teste
-  .gitignore
-```
+## License
 
-## Testare și compatibilitate
-
-Build/test nativ verificat pe **Pope23, Raspberry Pi 5 Model B Rev 1.1,
-aarch64**, Debian 13 (trixie), imagine Raspberry Pi generată prin pi-gen.
-Clang 19.1.7 și GCC 14.2.0 compilează fără warnings cu flagurile stricte.
-Suita finală conține **41 metode Python și 26 grupuri C**; subtestele și
-aserțiunile nu sunt numărate separat. Nu sunt revendicate teste pe alte plăci
-sau arhitecturi; rulează `make test` și pe sistemul tău.
-Nu include un executabil ARM precompilat.
-
-SIGTERM și SIGINT opresc procesul prin acțiunea implicită a semnalului; kernelul
-eliberează descriptorii, dar aplicația nu drenează cererile și nu parcurge un
-cleanup grațios. LeakSanitizer nu execută verificarea normală de ieșire pe
-această cale. Un rezultat fără raport LSan după semnal **nu demonstrează lipsa
-leak-urilor**. Verificările și limitările sunt în `docs/stage-7-results.md`.
-
-Timeouturile de 5 secunde se aplică apelurilor recv/send, fără deadline total
-al cererii. Serverul rămâne secvențial, fără autentificare/TLS, cu un subset HTTP
-și fără validare completă a UTF-8 primit direct. Este potrivit pentru demonstrații
-locale și portofoliu, nu pentru expunere publică pe Internet.
-
-## Licență
-
-Adaugă o licență pentru repository când decizi cum vrei să distribui codul.
+[MIT](LICENSE), copyright 2026 Pope23. No third-party implementation is bundled
+in the inspected source tree. Compilers, system libraries, browsers, Python, and
+GitHub Actions retain their own licenses; the project license does not relicense
+those tools. See the provenance scope in the release-readiness report.

@@ -2,7 +2,7 @@
 
 ## Mediu și finalizarea etapei 3 — 2026-11-09
 
-Verificat: `Pope23`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1, directorul
+Verificat: `Raspberry Pi test host`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1, directorul
 `<project-root>`. Modificările inițiale, inclusiv fișierele noi,
 aparțineau exclusiv etapei 3; backupul existent era separat și a rămas necomis.
 

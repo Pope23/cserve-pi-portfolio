@@ -2,7 +2,7 @@
 
 ## Etapa 1 — rezultate, 2026-11-09
 
-- Mediu: `<project-root>`, hostname `Pope23`, `aarch64`,
+- Mediu: `<project-root>`, hostname `Raspberry Pi test host`, `aarch64`,
   `/proc/device-tree/model`: Raspberry Pi 5 Model B Rev 1.1.
 - Backup înainte de modificări: `backups/before-stage-1.tar.gz`. Verificat prin
   compararea octeților arhivați cu fișierele originale; nu conține directoarele

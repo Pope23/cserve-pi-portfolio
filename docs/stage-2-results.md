@@ -2,7 +2,7 @@
 
 ## Etapele autorizate — 2026-11-09
 
-Mediu verificat: `<project-root>`, hostname `Pope23`,
+Mediu verificat: `<project-root>`, hostname `Raspberry Pi test host`,
 `uname -m`: `aarch64`, `/proc/device-tree/model`:
 `Raspberry Pi 5 Model B Rev 1.1`. Compilatoare instalate: Clang 19.1.7,
 GCC 14.2.0, target Linux ARM64. Nicio dependență instalată.

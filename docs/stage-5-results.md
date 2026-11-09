@@ -2,7 +2,7 @@
 
 ## Mediu și finalizarea etapei 4 — 2026-11-09
 
-Mediu confirmat: `Pope23`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1,
+Mediu confirmat: `Raspberry Pi test host`, `aarch64`, Raspberry Pi 5 Model B Rev 1.1,
 `<project-root>`.
 
 Au fost examinate diff-ul complet și fișierele noi ale etapei 4. Verificarea

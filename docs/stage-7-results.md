@@ -2,7 +2,7 @@
 
 ## Mediu și finalizarea etapei 6 — 2026-11-09
 
-Director `<project-root>`, hostname **Pope23**, arhitectură **aarch64**,
+Director `<project-root>`, hostname **Raspberry Pi test host**, arhitectură **aarch64**,
 model **Raspberry Pi 5 Model B Rev 1.1**. /etc/os-release identifică Debian 13
 trixie; /etc/rpi-issue indică imagine Raspberry Pi din 2026-04-21, generată cu
 pi-gen. Testarea este nativă pe această placă. Compilatoare: Clang 19.1.7 și
