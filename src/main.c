@@ -2,6 +2,7 @@
  * Educational server: sequential connections, in-memory data, no authentication.
  * Do not expose directly to the public Internet. */
 #define _POSIX_C_SOURCE 200809L
+#include "http_response.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -44,47 +45,6 @@ struct Request {
 
 static struct Task tasks[MAX_TASKS];
 static int next_id = 1;
-
-static void send_all(int socket_fd, const char *data, size_t len) {
-    size_t sent = 0;
-    while (sent < len) {
-        ssize_t result = send(socket_fd, data + sent, len - sent, 0);
-        if (result < 0 && errno == EINTR) continue;
-        if (result <= 0) return;
-        sent += (size_t)result;
-    }
-}
-
-static void respond(int fd, int status, const char *reason,
-                    const char *mime, const char *body, size_t length) {
-    char header[512];
-    int n = snprintf(header, sizeof(header),
-                     "HTTP/1.1 %d %s\r\n"
-                     "Content-Type: %s\r\n"
-                     "Content-Length: %zu\r\n"
-                     "Connection: close\r\n"
-                     "Cache-Control: no-store\r\n"
-                     "X-Content-Type-Options: nosniff\r\n\r\n",
-                     status, reason, mime, length);
-    if (n < 0 || (size_t)n >= sizeof(header)) return;
-    send_all(fd, header, (size_t)n);
-    if (length > 0) send_all(fd, body, length);
-}
-
-static void json_reply(int fd, int code, const char *reason, const char *json) {
-    respond(fd, code, reason, "application/json; charset=utf-8", json, strlen(json));
-}
-
-static void error_reply(int fd, int code) {
-    switch (code) {
-        case 400: json_reply(fd, 400, "Bad Request", "{\"error\":\"invalid request\"}"); break;
-        case 404: json_reply(fd, 404, "Not Found", "{\"error\":\"not found\"}"); break;
-        case 405: json_reply(fd, 405, "Method Not Allowed", "{\"error\":\"method not allowed\"}"); break;
-        case 411: json_reply(fd, 411, "Length Required", "{\"error\":\"content-length required\"}"); break;
-        case 413: json_reply(fd, 413, "Content Too Large", "{\"error\":\"request too large\"}"); break;
-        default:  json_reply(fd, 500, "Internal Server Error", "{\"error\":\"server error\"}"); break;
-    }
-}
 
 static char *find_header_end(char *buf) {
     return strstr(buf, "\r\n\r\n");
@@ -312,75 +272,75 @@ static bool append_task(char *out, size_t cap, size_t *pos, const struct Task *t
 static void list_tasks(int fd) {
     char out[MAX_JSON] = {0};
     size_t pos = 0;
-    if (!append(out, sizeof(out), &pos, "{\"tasks\":[")) { error_reply(fd, 500); return; }
+    if (!append(out, sizeof(out), &pos, "{\"tasks\":[")) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
     bool first = true;
     for (size_t i = 0; i < MAX_TASKS; i++) {
         if (!tasks[i].active) continue;
-        if (!first && !append(out, sizeof(out), &pos, ",")) { error_reply(fd, 500); return; }
+        if (!first && !append(out, sizeof(out), &pos, ",")) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
         first = false;
-        if (!append_task(out, sizeof(out), &pos, &tasks[i])) { error_reply(fd, 500); return; }
+        if (!append_task(out, sizeof(out), &pos, &tasks[i])) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
     }
-    if (!append(out, sizeof(out), &pos, "]}")) { error_reply(fd, 500); return; }
-    json_reply(fd, 200, "OK", out);
+    if (!append(out, sizeof(out), &pos, "]}")) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
+    http_json_reply(fd, HTTP_OK, HTTP_REASON_OK, out);
 }
 
 static void create_task(int fd, const char *body) {
     char title[MAX_TITLE + 1];
-    if (!get_title(body, title)) { error_reply(fd, 400); return; }
+    if (!get_title(body, title)) { http_error_reply(fd, HTTP_BAD_REQUEST); return; }
     for (size_t i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].active) continue;
-        if (next_id == INT32_MAX) { error_reply(fd, 500); return; }
+        if (next_id == INT32_MAX) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
         tasks[i].id = next_id++;
         tasks[i].active = true;
         memcpy(tasks[i].title, title, strlen(title) + 1U);
         char out[MAX_TITLE * 2 + 128] = {0};
         size_t pos = 0;
-        if (!append_task(out, sizeof(out), &pos, &tasks[i])) { error_reply(fd, 500); return; }
-        json_reply(fd, 201, "Created", out);
+        if (!append_task(out, sizeof(out), &pos, &tasks[i])) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
+        http_json_reply(fd, HTTP_CREATED, HTTP_REASON_CREATED, out);
         return;
     }
-    json_reply(fd, 507, "Insufficient Storage", "{\"error\":\"task limit reached\"}");
+    http_json_reply(fd, HTTP_INSUFFICIENT_STORAGE, HTTP_REASON_INSUFFICIENT_STORAGE, "{\"error\":\"task limit reached\"}");
 }
 
 static void delete_task(int fd, const char *path) {
     const char *id_text = path + strlen("/api/tasks/");
-    if (!*id_text) { error_reply(fd, 404); return; }
+    if (!*id_text) { http_error_reply(fd, HTTP_NOT_FOUND); return; }
     for (const char *p = id_text; *p; p++) {
-        if (!isdigit((unsigned char)*p)) { error_reply(fd, 404); return; }
+        if (!isdigit((unsigned char)*p)) { http_error_reply(fd, HTTP_NOT_FOUND); return; }
     }
     errno = 0;
     char *end = NULL;
     long number = strtol(id_text, &end, 10);
     if (errno != 0 || *end != '\0' || number <= 0 || number > INT32_MAX) {
-        error_reply(fd, 404);
+        http_error_reply(fd, HTTP_NOT_FOUND);
         return;
     }
     for (size_t i = 0; i < MAX_TASKS; i++) {
         if (tasks[i].active && tasks[i].id == (int)number) {
             tasks[i].active = false;
-            respond(fd, 204, "No Content", "application/json", "", 0);
+            http_respond(fd, HTTP_NO_CONTENT, HTTP_REASON_NO_CONTENT, HTTP_MIME_EMPTY_JSON, "", 0);
             return;
         }
     }
-    error_reply(fd, 404);
+    http_error_reply(fd, HTTP_NOT_FOUND);
 }
 
 static void serve_page(int fd) {
     FILE *f = fopen("web/index.html", "rb");
-    if (!f) { error_reply(fd, 500); return; }
+    if (!f) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
     char html[MAX_PAGE];
     size_t n = fread(html, 1, sizeof(html), f);
     bool bad = ferror(f) || (!feof(f) && n == sizeof(html));
     fclose(f);
-    if (bad) { error_reply(fd, 500); return; }
-    respond(fd, 200, "OK", "text/html; charset=utf-8", html, n);
+    if (bad) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
+    http_respond(fd, HTTP_OK, HTTP_REASON_OK, HTTP_MIME_HTML, html, n);
 }
 
 static void route(int fd, const struct Request *req) {
     if (strcmp(req->method, "GET") == 0) {
         if (strcmp(req->path, "/") == 0) { serve_page(fd); return; }
         if (strcmp(req->path, "/health") == 0) {
-            json_reply(fd, 200, "OK", "{\"status\":\"ok\"}"); return;
+            http_json_reply(fd, HTTP_OK, HTTP_REASON_OK, "{\"status\":\"ok\"}"); return;
         }
         if (strcmp(req->path, "/api/tasks") == 0) { list_tasks(fd); return; }
     }
@@ -390,8 +350,8 @@ static void route(int fd, const struct Request *req) {
     if (strcmp(req->method, "DELETE") == 0 && strncmp(req->path, "/api/tasks/", 11) == 0) {
         delete_task(fd, req->path); return;
     }
-    if (strcmp(req->path, "/api/tasks") == 0) { error_reply(fd, 405); return; }
-    error_reply(fd, 404);
+    if (strcmp(req->path, "/api/tasks") == 0) { http_error_reply(fd, HTTP_METHOD_NOT_ALLOWED); return; }
+    http_error_reply(fd, HTTP_NOT_FOUND);
 }
 
 static void handle_client(int fd) {
@@ -400,7 +360,7 @@ static void handle_client(int fd) {
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     struct Request request = {0};
     int status = read_request(fd, &request);
-    if (status != 0) error_reply(fd, status);
+    if (status != 0) http_error_reply(fd, status);
     else route(fd, &request);
 }
 

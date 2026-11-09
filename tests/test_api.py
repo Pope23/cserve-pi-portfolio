@@ -17,6 +17,9 @@ JSON_MIME = "application/json; charset=utf-8"
 EMPTY_JSON_MIME = "application/json"
 OVERSIZED_BODY_BYTES = 5000
 INVALID_TASK_IDS = ("", "0", "-1", "abc", "2147483648")
+SOCKET_TIMEOUT_SECONDS = 2
+SOCKET_READ_BYTES = 4096
+MAX_RESPONSE_BYTES = 65536
 
 
 def unused_port():
@@ -76,6 +79,40 @@ class CServeApiTests(unittest.TestCase):
         self.assertEqual(headers["Connection"], "close")
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+
+    def raw_response(self, request):
+        with socket.create_connection(("127.0.0.1", self.port),
+                                      timeout=SOCKET_TIMEOUT_SECONDS) as conn:
+            conn.sendall(request)
+            response = bytearray()
+            while True:
+                chunk = conn.recv(SOCKET_READ_BYTES)
+                if not chunk:
+                    return bytes(response)
+                response.extend(chunk)
+                self.assertLessEqual(len(response), MAX_RESPONSE_BYTES)
+
+    def test_delete_has_no_body_on_wire(self):
+        status, _, _ = self.call("POST", TASKS_PATH, {"title": "socket contract"})
+        self.assertEqual(status, HTTPStatus.CREATED)
+        wire = self.raw_response(
+            b"DELETE /api/tasks/1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        self.assertEqual(wire, (
+            b"HTTP/1.1 204 No Content\r\n"
+            b"Content-Type: application/json\r\nContent-Length: 0\r\n"
+            b"Connection: close\r\nCache-Control: no-store\r\n"
+            b"X-Content-Type-Options: nosniff\r\n\r\n"
+        ))
+
+    def test_length_required_response_on_wire(self):
+        wire = self.raw_response(b"POST /api/tasks HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        header, body = wire.split(b"\r\n\r\n", 1)
+        self.assertEqual(header.split(b"\r\n")[0], b"HTTP/1.1 411 Length Required")
+        self.assertEqual(body, b'{"error":"content-length required"}')
+        headers = dict(line.decode("ascii").split(": ", 1)
+                       for line in header.split(b"\r\n")[1:])
+        self.assert_response_metadata(body, headers)
 
     def test_response_headers(self):
         cases = (
