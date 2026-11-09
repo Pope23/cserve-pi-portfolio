@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CServe Pi · Dashboard</title>
+  <style>
+    :root {font-family: system-ui, -apple-system, sans-serif; color-scheme: dark;}
+    body {background:#101a2b;color:#eaf0ff;min-height:100vh;display:grid;place-items:center;margin:0;padding:20px;box-sizing:border-box}
+    main {width:min(100%,580px);border:1px solid #3c4d69;background:#18253d;border-radius:20px;padding:28px;box-shadow:0 20px 80px #0005}
+    h1 {font-size:1.8rem;margin:0 0 8px} p {color:#b1bfd8;margin:0 0 24px} form {display:flex;gap:10px}
+    input,button {border:1px solid #577094;padding:12px;border-radius:9px;font:inherit}
+    input {min-width:0;flex:1;background:#0d1727;color:white} button {cursor:pointer;background:#4f78ee;color:white;border:0;font-weight:600}
+    ul {list-style:none;padding:0;margin:22px 0 0} li {padding:13px 0;border-bottom:1px solid #30435e;display:flex;justify-content:space-between;gap:16px;align-items:center;overflow-wrap:anywhere}
+    li button {background:#394963;padding:8px 12px;flex-shrink:0} #message {min-height:22px;margin-top:15px;color:#ffb6b6} .tag {font-size:12px;color:#8be9b7;text-transform:uppercase;letter-spacing:1.6px}
+  </style>
+</head>
+<body>
+<main>
+  <div class="tag">Raspberry Pi · HTTP · C17</div>
+  <h1>CServe Pi</h1>
+  <p>Un server HTTP scris în C, cu o listă de taskuri accesibilă prin REST API.</p>
+  <form id="task-form">
+    <input id="task-title" maxlength="120" placeholder="Ex: Testez sockets TCP" aria-label="Titlu task" required>
+    <button type="submit">Adaugă</button>
+  </form>
+  <div id="message" role="status" aria-live="polite"></div>
+  <ul id="task-list"></ul>
+</main>
+<script>
+const tasks = document.getElementById('task-list');
+const message = document.getElementById('message');
+const form = document.getElementById('task-form');
+const input = document.getElementById('task-title');
+async function request(method, path, data) {
+  const response = await fetch(path, {method, headers: {'Content-Type':'application/json'},
+    body: data ? JSON.stringify(data) : undefined});
+  if (!response.ok) throw new Error(`Serverul a răspuns cu HTTP ${response.status}`);
+  return response.status === 204 ? null : response.json();
+}
+async function refresh() {
+  const result = await request('GET','/api/tasks');
+  tasks.replaceChildren();
+  for (const task of result.tasks) {
+    const li = document.createElement('li');
+    const label = document.createElement('span');
+    label.textContent = task.title; // never interpret task content as HTML
+    const remove = document.createElement('button');
+    remove.textContent = 'Șterge';
+    remove.setAttribute('aria-label', `Șterge ${task.title}`);
+    remove.addEventListener('click', async () => {
+      try { await request('DELETE', `/api/tasks/${task.id}`); await refresh(); }
+      catch (error) { message.textContent = error.message; }
+    });
+    li.append(label,remove);
+    tasks.append(li);
+  }
+}
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  message.textContent = '';
+  try { await request('POST','/api/tasks',{title:input.value.trim()}); input.value=''; await refresh(); }
+  catch (error) { message.textContent = error.message; }
+});
+refresh().catch(error => message.textContent = error.message);
+</script>
+</body>
+</html>

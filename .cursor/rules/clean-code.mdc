@@ -1,0 +1,34 @@
+---
+description: Clean Code and behavior preservation for CServe Pi
+alwaysApply: true
+---
+
+# CServe Pi — Clean Code
+
+- No hardcoded strings or magic numbers for configuration, routes, protocol
+  metadata, messages, capacities, or limits: use named constants at the owning
+  module. Derive lengths from those constants instead of duplicating values.
+  Ordinary syntax characters and obvious 0/1 operations may remain literals;
+  name encoding masks and boundaries where that explains their meaning.
+- No duplicated logic: extract cohesive shared helpers, including in existing
+  code touched by a refactor. Do not merge different validation policies merely
+  because they look similar.
+- Functions should have one responsibility and aim for approximately 20 lines
+  where reasonable. Never fragment functions artificially to meet a line count.
+- Cyclomatic complexity must be at most 20 per function, with a target below 10.
+  Review branches manually; report measured scores only when an analysis tool
+  was actually run, identifying its method and limitations.
+- Keep C17 portable on Linux ARM64 using POSIX sockets. Avoid assumptions about
+  integer widths, signedness, alignment, and host/network byte order.
+- Validate all external input. Check capacity, terminators, integer overflow and
+  signed/unsigned conversions before buffer arithmetic, parsing, formatting,
+  and copying. Keep the strict compiler warnings in Makefile.
+- Do not change API behavior without tests. For behavior changes, first add a
+  failing integration test, run `make test` and observe failure, implement the
+  minimum change, then rerun all tests (RED → GREEN → REFACTOR). For structural
+  refactors preserve passing characterization tests before and after extraction.
+- Keep defaults loopback-only; never insert untrusted frontend text as
+  `innerHTML`. No new dependencies, threading, databases, or frameworks without
+  an explicit scope decision and documented reason.
+
+Codex must also follow `AGENTS.md`, which states these rules explicitly.
