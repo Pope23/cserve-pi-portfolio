@@ -20,6 +20,7 @@ INVALID_TASK_IDS = ("", "0", "-1", "abc", "2147483648")
 SOCKET_TIMEOUT_SECONDS = 2
 SOCKET_READ_BYTES = 4096
 MAX_RESPONSE_BYTES = 65536
+TASK_CAPACITY = 128
 
 
 def unused_port():
@@ -182,6 +183,29 @@ class CServeApiTests(unittest.TestCase):
         status, body, _ = self.call("GET", "/api/tasks")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"tasks": []})
+
+    def test_capacity_and_reused_slot_order(self):
+        expected = []
+        for task_id in range(1, TASK_CAPACITY + 1):
+            title = f"task {task_id}"
+            status, body, _ = self.call("POST", TASKS_PATH, {"title": title})
+            self.assertEqual(status, HTTPStatus.CREATED)
+            task = {"id": task_id, "title": title}
+            self.assertEqual(json.loads(body), task)
+            expected.append(task)
+        status, body, headers = self.call("POST", TASKS_PATH, {"title": "full"})
+        self.assertEqual(status, HTTPStatus.INSUFFICIENT_STORAGE)
+        self.assertEqual(body, b'{"error":"task limit reached"}')
+        self.assert_response_metadata(body, headers)
+        self.assertEqual(json.loads(self.call("GET", TASKS_PATH)[1]), {"tasks": expected})
+        self.assertEqual(self.call("DELETE", TASKS_PATH + "/2")[:2], (HTTPStatus.NO_CONTENT, b""))
+        status, body, _ = self.call("POST", TASKS_PATH, {"title": "replacement"})
+        self.assertEqual(status, HTTPStatus.CREATED)
+        replacement = {"id": TASK_CAPACITY + 1, "title": "replacement"}
+        self.assertEqual(json.loads(body), replacement)
+        expected[1] = replacement
+        self.assertEqual(json.loads(self.call("GET", TASKS_PATH)[1]), {"tasks": expected})
+        self.assertEqual(self.call("DELETE", TASKS_PATH + "/2")[0], HTTPStatus.NOT_FOUND)
 
     def test_create_read_delete(self):
         status, body, _ = self.call("POST", "/api/tasks", {"title": "Învață C & sockets"})

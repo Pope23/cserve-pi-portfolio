@@ -3,6 +3,7 @@
  * Do not expose directly to the public Internet. */
 #define _POSIX_C_SOURCE 200809L
 #include "http_response.h"
+#include "task_storage.h"
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -22,19 +23,11 @@
 
 #define DEFAULT_HOST "127.0.0.1"
 #define DEFAULT_PORT 8080
-#define MAX_TASKS 128
-#define MAX_TITLE 120
 #define MAX_HEADER 8192
 #define MAX_BODY 4096
 #define MAX_WIRE (MAX_HEADER + MAX_BODY + 1)
 #define MAX_JSON 65536
 #define MAX_PAGE 32768
-
-struct Task {
-    int id;
-    bool active;
-    char title[MAX_TITLE + 1];
-};
 
 struct Request {
     char method[16];
@@ -42,9 +35,6 @@ struct Request {
     char body[MAX_BODY + 1];
     size_t content_length;
 };
-
-static struct Task tasks[MAX_TASKS];
-static int next_id = 1;
 
 static char *find_header_end(char *buf) {
     return strstr(buf, "\r\n\r\n");
@@ -269,40 +259,40 @@ static bool append_task(char *out, size_t cap, size_t *pos, const struct Task *t
         && append(out, cap, pos, "}");
 }
 
-static void list_tasks(int fd) {
+static void list_tasks(int fd, const struct TaskStorage *storage) {
     char out[MAX_JSON] = {0};
     size_t pos = 0;
     if (!append(out, sizeof(out), &pos, "{\"tasks\":[")) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
     bool first = true;
     for (size_t i = 0; i < MAX_TASKS; i++) {
-        if (!tasks[i].active) continue;
+        const struct Task *task = task_storage_at(storage, i);
+        if (!task) continue;
         if (!first && !append(out, sizeof(out), &pos, ",")) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
         first = false;
-        if (!append_task(out, sizeof(out), &pos, &tasks[i])) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
+        if (!append_task(out, sizeof(out), &pos, task)) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
     }
     if (!append(out, sizeof(out), &pos, "]}")) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
     http_json_reply(fd, HTTP_OK, HTTP_REASON_OK, out);
 }
 
-static void create_task(int fd, const char *body) {
+static void create_task(int fd, const char *body, struct TaskStorage *storage) {
     char title[MAX_TITLE + 1];
     if (!get_title(body, title)) { http_error_reply(fd, HTTP_BAD_REQUEST); return; }
-    for (size_t i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].active) continue;
-        if (next_id == INT32_MAX) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
-        tasks[i].id = next_id++;
-        tasks[i].active = true;
-        memcpy(tasks[i].title, title, strlen(title) + 1U);
-        char out[MAX_TITLE * 2 + 128] = {0};
-        size_t pos = 0;
-        if (!append_task(out, sizeof(out), &pos, &tasks[i])) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
-        http_json_reply(fd, HTTP_CREATED, HTTP_REASON_CREATED, out);
+    const struct Task *task = NULL;
+    enum TaskCreateResult result = task_storage_create(storage, title, &task);
+    if (result == TASK_CREATE_FULL) {
+        http_json_reply(fd, HTTP_INSUFFICIENT_STORAGE, HTTP_REASON_INSUFFICIENT_STORAGE,
+                        "{\"error\":\"task limit reached\"}");
         return;
     }
-    http_json_reply(fd, HTTP_INSUFFICIENT_STORAGE, HTTP_REASON_INSUFFICIENT_STORAGE, "{\"error\":\"task limit reached\"}");
+    if (result == TASK_CREATE_ID_EXHAUSTED) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
+    char out[MAX_TITLE * 2 + 128] = {0};
+    size_t pos = 0;
+    if (!append_task(out, sizeof(out), &pos, task)) { http_error_reply(fd, HTTP_INTERNAL_SERVER_ERROR); return; }
+    http_json_reply(fd, HTTP_CREATED, HTTP_REASON_CREATED, out);
 }
 
-static void delete_task(int fd, const char *path) {
+static void delete_task(int fd, const char *path, struct TaskStorage *storage) {
     const char *id_text = path + strlen("/api/tasks/");
     if (!*id_text) { http_error_reply(fd, HTTP_NOT_FOUND); return; }
     for (const char *p = id_text; *p; p++) {
@@ -315,12 +305,9 @@ static void delete_task(int fd, const char *path) {
         http_error_reply(fd, HTTP_NOT_FOUND);
         return;
     }
-    for (size_t i = 0; i < MAX_TASKS; i++) {
-        if (tasks[i].active && tasks[i].id == (int)number) {
-            tasks[i].active = false;
-            http_respond(fd, HTTP_NO_CONTENT, HTTP_REASON_NO_CONTENT, HTTP_MIME_EMPTY_JSON, "", 0);
-            return;
-        }
+    if (task_storage_delete(storage, (int)number)) {
+        http_respond(fd, HTTP_NO_CONTENT, HTTP_REASON_NO_CONTENT, HTTP_MIME_EMPTY_JSON, "", 0);
+        return;
     }
     http_error_reply(fd, HTTP_NOT_FOUND);
 }
@@ -336,32 +323,32 @@ static void serve_page(int fd) {
     http_respond(fd, HTTP_OK, HTTP_REASON_OK, HTTP_MIME_HTML, html, n);
 }
 
-static void route(int fd, const struct Request *req) {
+static void route(int fd, const struct Request *req, struct TaskStorage *storage) {
     if (strcmp(req->method, "GET") == 0) {
         if (strcmp(req->path, "/") == 0) { serve_page(fd); return; }
         if (strcmp(req->path, "/health") == 0) {
             http_json_reply(fd, HTTP_OK, HTTP_REASON_OK, "{\"status\":\"ok\"}"); return;
         }
-        if (strcmp(req->path, "/api/tasks") == 0) { list_tasks(fd); return; }
+        if (strcmp(req->path, "/api/tasks") == 0) { list_tasks(fd, storage); return; }
     }
     if (strcmp(req->method, "POST") == 0 && strcmp(req->path, "/api/tasks") == 0) {
-        create_task(fd, req->body); return;
+        create_task(fd, req->body, storage); return;
     }
     if (strcmp(req->method, "DELETE") == 0 && strncmp(req->path, "/api/tasks/", 11) == 0) {
-        delete_task(fd, req->path); return;
+        delete_task(fd, req->path, storage); return;
     }
     if (strcmp(req->path, "/api/tasks") == 0) { http_error_reply(fd, HTTP_METHOD_NOT_ALLOWED); return; }
     http_error_reply(fd, HTTP_NOT_FOUND);
 }
 
-static void handle_client(int fd) {
+static void handle_client(int fd, struct TaskStorage *storage) {
     struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     struct Request request = {0};
     int status = read_request(fd, &request);
     if (status != 0) http_error_reply(fd, status);
-    else route(fd, &request);
+    else route(fd, &request, storage);
 }
 
 static bool valid_port(const char *text, uint16_t *port) {
@@ -388,6 +375,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Only loopback or all interfaces are supported.\n");
         return 2;
     }
+    struct TaskStorage storage;
+    task_storage_init(&storage);
     (void)signal(SIGPIPE, SIG_IGN);
     int server = socket(AF_INET, SOCK_STREAM, 0);
     if (server < 0) { perror("socket"); return 1; }
@@ -411,7 +400,7 @@ int main(int argc, char **argv) {
             perror("accept");
             break;
         }
-        handle_client(client);
+        handle_client(client, &storage);
         close(client);
     }
     close(server);
