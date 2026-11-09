@@ -3,6 +3,7 @@ import http.client
 from http import HTTPStatus
 import json
 import os
+import signal
 from pathlib import Path
 import socket
 import subprocess
@@ -25,6 +26,9 @@ HEADER_LIMIT_BYTES = 8192
 BODY_LIMIT_BYTES = 4096
 TITLE_LIMIT_BYTES = 120
 RESOURCE_CHECK_REQUESTS = 32
+SERVER_TIMEOUT_WAIT_SECONDS = 7
+SERVER_ACTIVE_FDS = 5  # Standard streams, listener and one accepted client.
+PROCESS_POLL_SECONDS = 0.01
 
 
 def unused_port():
@@ -102,6 +106,47 @@ class CServeApiTests(CServeTestCase):
             self.assertEqual(self.call("GET", HEALTH_PATH)[0], HTTPStatus.OK)
         # At most one client can still be closing when /proc is inspected.
         self.assertLessEqual(len(list(descriptors.iterdir())), baseline + 1)
+
+    def assert_signal_shutdown(self, signum, *, active_client=False):
+        if active_client:
+            conn = socket.create_connection(("127.0.0.1", self.port),
+                                            timeout=SOCKET_TIMEOUT_SECONDS)
+            self.addCleanup(conn.close)
+            conn.sendall(b"POST /api/tasks HTTP/1.1\r\nContent-Length: 20\r\n\r\n{")
+            deadline = time.monotonic() + SOCKET_TIMEOUT_SECONDS
+            descriptors = Path(f"/proc/{self.process.pid}/fd")
+            while len(list(descriptors.iterdir())) < SERVER_ACTIVE_FDS:
+                self.assertLess(time.monotonic(), deadline, "client was not accepted")
+                time.sleep(PROCESS_POLL_SECONDS)
+        self.process.send_signal(signum)
+        _, stderr = self.process.communicate(timeout=SOCKET_TIMEOUT_SECONDS)
+        self.assertEqual(self.process.returncode, -signum)
+        self.assert_no_sanitizer_diagnostics(stderr)
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", self.port))
+
+    def test_sigterm_stops_server(self):
+        self.assert_signal_shutdown(signal.SIGTERM)
+
+    def test_sigint_stops_server(self):
+        self.assert_signal_shutdown(signal.SIGINT)
+
+    def test_sigterm_with_incomplete_client(self):
+        self.assert_signal_shutdown(signal.SIGTERM, active_client=True)
+
+    def test_sigint_with_incomplete_client(self):
+        self.assert_signal_shutdown(signal.SIGINT, active_client=True)
+
+    def test_inactive_client_receive_timeout(self):
+        with socket.create_connection(("127.0.0.1", self.port),
+                                      timeout=SERVER_TIMEOUT_WAIT_SECONDS) as conn:
+            conn.sendall(b"GET /health HTTP/1.1\r\n")
+            response = http.client.HTTPResponse(conn)
+            response.begin()
+            self.assertEqual(response.status, HTTPStatus.BAD_REQUEST)
+            self.assertEqual(response.read(), b'{"error":"invalid request"}')
+        self.assertEqual(self.call("GET", HEALTH_PATH)[0], HTTPStatus.OK)
 
     def assert_response_metadata(self, body, headers, mime=JSON_MIME):
         self.assertEqual(headers["Content-Type"], mime)

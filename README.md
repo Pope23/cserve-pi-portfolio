@@ -81,6 +81,14 @@ make debug
 make test
 ```
 
+`make debug` instrumentează serverul cu ASan/UBSan. Pentru a instrumenta și
+toate harness-urile C, configurația verificată pe Pi este:
+
+```bash
+make clean
+UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=halt_on_error=1 make CC=clang CFLAGS='-std=c17 -O1 -g -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror -D_POSIX_C_SOURCE=200809L -fsanitize=address,undefined -fno-omit-frame-pointer' test
+```
+
 Pentru a reveni la binarul normal: `make clean && make`.
 
 ## 4. Pornește serverul
@@ -169,11 +177,22 @@ Poți începe cu promptul din `docs/prompt-superpowers.md`.
 
 ```text
 cserve-pi/
-  src/main.c                 serverul scris în C17
+  src/main.c                 CLI și configurația validată
+  src/server.c / .h          listener, clienți, timeouturi și context storage
+  src/http_parser.c / .h     parsare HTTP și citire limitată a cererii
+  src/router.c / .h          rute, handlers, JSON și pagina fixă
+  src/http_response.c / .h   formatarea și trimiterea răspunsurilor
+  src/task_storage.c / .h    array în memorie, ID-uri și operații cu taskuri
   web/index.html             dashboard în HTML/JS
   tests/test_api.py          teste de integrare
+  tests/test_http_response.c teste C pentru send/formatare/erori
+  tests/test_http_parser.c   teste C pentru recv/parsare/limite
+  tests/test_task_storage.c  teste C pentru capacitate/ID-uri/izolare
+  tests/test_server.c        teste C pentru ciclul de viață și cleanup
   deploy/cserve.service      user service systemd, opțional
-  docs/design.md             arhitectura primei versiuni
+  docs/design.md             arhitectura modulară și contractele
+  docs/refactor-plan.md      cele șapte etape de refactorizare
+  docs/stage-7-results.md    auditul și rezultatele finale
   docs/roadmap.md            idei de evoluție testabile
   docs/prompt-superpowers.md prompt pentru agent AI
   AGENTS.md                  reguli de lucru
@@ -183,10 +202,24 @@ cserve-pi/
 
 ## Testare și compatibilitate
 
-Codul a fost compilat și testat într-un mediu Linux x86-64. Fiind bazat pe
-POSIX sockets și C17, este gândit să se compileze pe Raspberry Pi OS (32/64-bit),
-dar **testarea efectivă pe placa ta** trebuie realizată cu `make test`.
+Build/test nativ verificat pe **Pope23, Raspberry Pi 5 Model B Rev 1.1,
+aarch64**, Debian 13 (trixie), imagine Raspberry Pi generată prin pi-gen.
+Clang 19.1.7 și GCC 14.2.0 compilează fără warnings cu flagurile stricte.
+Suita finală conține **41 metode Python și 26 grupuri C**; subtestele și
+aserțiunile nu sunt numărate separat. Nu sunt revendicate teste pe alte plăci
+sau arhitecturi; rulează `make test` și pe sistemul tău.
 Nu include un executabil ARM precompilat.
+
+SIGTERM și SIGINT opresc procesul prin acțiunea implicită a semnalului; kernelul
+eliberează descriptorii, dar aplicația nu drenează cererile și nu parcurge un
+cleanup grațios. LeakSanitizer nu execută verificarea normală de ieșire pe
+această cale. Un rezultat fără raport LSan după semnal **nu demonstrează lipsa
+leak-urilor**. Verificările și limitările sunt în `docs/stage-7-results.md`.
+
+Timeouturile de 5 secunde se aplică apelurilor recv/send, fără deadline total
+al cererii. Serverul rămâne secvențial, fără autentificare/TLS, cu un subset HTTP
+și fără validare completă a UTF-8 primit direct. Este potrivit pentru demonstrații
+locale și portofoliu, nu pentru expunere publică pe Internet.
 
 ## Licență
 
