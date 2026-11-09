@@ -7,8 +7,10 @@ RESPONSE_TEST = build/test_http_response
 STORAGE_TEST = build/test_task_storage
 PARSER_TEST = build/test_http_parser
 SERVER_TEST = build/test_server
-RESPONSE_TEST_FLAGS = -Wl,--wrap=send -Wl,--wrap=snprintf
-PARSER_TEST_FLAGS = -Wl,--wrap=recv
+# glibc fortification redirects snprintf/recv past the fault-injection wrappers.
+WRAP_TEST_CFLAGS = -U_FORTIFY_SOURCE
+RESPONSE_TEST_FLAGS = $(WRAP_TEST_CFLAGS) -Wl,--wrap=send -Wl,--wrap=snprintf
+PARSER_TEST_FLAGS = $(WRAP_TEST_CFLAGS) -Wl,--wrap=recv
 SERVER_TEST_FLAGS = -Wl,--wrap=socket -Wl,--wrap=setsockopt -Wl,--wrap=bind -Wl,--wrap=listen -Wl,--wrap=accept -Wl,--wrap=close
 
 .PHONY: all test clean debug
