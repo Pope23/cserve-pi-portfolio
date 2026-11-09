@@ -1,5 +1,6 @@
 """Black-box integration tests of the real C server using only Python stdlib."""
 import http.client
+from http import HTTPStatus
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "build" / "cserve"
+TASKS_PATH = "/api/tasks"
+HEALTH_PATH = "/health"
+JSON_MIME = "application/json; charset=utf-8"
+EMPTY_JSON_MIME = "application/json"
+OVERSIZED_BODY_BYTES = 5000
+INVALID_TASK_IDS = ("", "0", "-1", "abc", "2147483648")
 
 
 def unused_port():
@@ -61,6 +68,72 @@ class CServeApiTests(unittest.TestCase):
         status, body, _ = self.call("GET", "/health")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"status": "ok"})
+        self.assertEqual(body, b'{"status":"ok"}')
+
+    def assert_response_metadata(self, body, headers, mime=JSON_MIME):
+        self.assertEqual(headers["Content-Type"], mime)
+        self.assertEqual(headers["Content-Length"], str(len(body)))
+        self.assertEqual(headers["Connection"], "close")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+
+    def test_response_headers(self):
+        cases = (
+            (HEALTH_PATH, JSON_MIME),
+            (TASKS_PATH, JSON_MIME),
+            ("/", "text/html; charset=utf-8"),
+        )
+        for path, mime in cases:
+            with self.subTest(path=path):
+                status, body, headers = self.call("GET", path)
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assert_response_metadata(body, headers, mime)
+
+    def test_create_and_delete_response_metadata(self):
+        title = "Învață 🥧 sockets"
+        status, body, headers = self.call("POST", TASKS_PATH, {"title": title})
+        self.assertEqual(status, HTTPStatus.CREATED)
+        self.assertEqual(json.loads(body), {"id": 1, "title": title})
+        self.assert_response_metadata(body, headers)
+        status, body, headers = self.call("DELETE", TASKS_PATH + "/1")
+        self.assertEqual(status, HTTPStatus.NO_CONTENT)
+        self.assertEqual(body, b"")
+        self.assert_response_metadata(body, headers, EMPTY_JSON_MIME)
+
+    def test_invalid_delete_ids(self):
+        for task_id in INVALID_TASK_IDS:
+            with self.subTest(task_id=task_id):
+                status, body, headers = self.call("DELETE", TASKS_PATH + "/" + task_id)
+                self.assertEqual(status, HTTPStatus.NOT_FOUND)
+                self.assertEqual(body, b'{"error":"not found"}')
+                self.assert_response_metadata(body, headers)
+
+    def test_error_response_contract(self):
+        cases = (
+            ("POST", TASKS_PATH, {"title": ""}, HTTPStatus.BAD_REQUEST,
+             b'{"error":"invalid request"}'),
+            ("POST", HEALTH_PATH, {}, HTTPStatus.NOT_FOUND,
+             b'{"error":"not found"}'),
+            ("GET", TASKS_PATH + "/1", None, HTTPStatus.NOT_FOUND,
+             b'{"error":"not found"}'),
+            ("PUT", TASKS_PATH, None, HTTPStatus.METHOD_NOT_ALLOWED,
+             b'{"error":"method not allowed"}'),
+        )
+        for method, path, data, expected_status, expected_body in cases:
+            with self.subTest(method=method, path=path, status=expected_status):
+                status, body, headers = self.call(method, path, data)
+                self.assertEqual(status, expected_status)
+                self.assertEqual(body, expected_body)
+                self.assert_response_metadata(body, headers)
+
+    def test_oversized_length_response_metadata(self):
+        # Rejecting the declared length must not require reading a request body.
+        status, body, headers = self.call(
+            "POST", TASKS_PATH, headers={"Content-Length": str(OVERSIZED_BODY_BYTES)},
+        )
+        self.assertEqual(status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        self.assertEqual(body, b'{"error":"request too large"}')
+        self.assert_response_metadata(body, headers)
 
     def test_dashboard(self):
         status, body, headers = self.call("GET", "/")
